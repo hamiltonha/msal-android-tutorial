@@ -26,143 +26,281 @@ package com.azuresamples.msalandroidapp;
 import android.os.Bundle;
 
 import androidx.annotation.NonNull;
-import androidx.appcompat.app.ActionBarDrawerToggle;
+import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.appcompat.widget.Toolbar;
-import androidx.constraintlayout.widget.ConstraintLayout;
-import androidx.core.view.GravityCompat;
 
-import android.view.MenuItem;
+import android.util.Log;
 import android.view.View;
+import android.widget.Button;
+import android.widget.TextView;
+import android.widget.Toast;
 
-import androidx.drawerlayout.widget.DrawerLayout;
-import androidx.fragment.app.Fragment;
-import androidx.fragment.app.FragmentTransaction;
+import com.microsoft.graph.authentication.IAuthenticationProvider;
+import com.microsoft.graph.concurrency.ICallback;
+import com.microsoft.graph.core.ClientException;
+import com.microsoft.graph.http.IHttpRequest;
+import com.microsoft.graph.models.extensions.Drive;
+import com.microsoft.graph.models.extensions.IGraphServiceClient;
+import com.microsoft.graph.requests.extensions.GraphServiceClient;
+import com.microsoft.identity.client.AuthenticationCallback;
+import com.microsoft.identity.client.IAccount;
+import com.microsoft.identity.client.IAuthenticationResult;
+import com.microsoft.identity.client.IPublicClientApplication;
+import com.microsoft.identity.client.ISingleAccountPublicClientApplication;
+import com.microsoft.identity.client.PublicClientApplication;
+import com.microsoft.identity.client.SilentAuthenticationCallback;
+import com.microsoft.identity.client.exception.*;
+
+import com.google.gson.JsonObject;
 
 
-import com.google.android.material.navigation.NavigationView;
+public class MainActivity extends AppCompatActivity {
 
-public class MainActivity extends AppCompatActivity
-        implements NavigationView.OnNavigationItemSelectedListener,
-        OnFragmentInteractionListener{
 
-    enum AppFragment {
-        SingleAccount,
-        MultipleAccount,
-        B2C
-    }
+    private static final String TAG = MainActivity.class.getSimpleName();
+    private static String[] SCOPES = {"user.Read"};
 
-    private AppFragment mCurrentFragment;
+    /* Azure AD v2 Configs */
+    final static String AUTHORITY = "https://login.microsoftonline.com/common";
 
-    private ConstraintLayout mContentMain;
+    /* UI & Debugging Variables */
+    Button signInButton;
+    Button signOutButton;
+    Button callGraphApiInteractiveButton;
+    Button callGraphApiSilentButton;
+    TextView logTextView;
+    TextView currentUserTextView;
+
+    /* Azure AD Variables */
+    private ISingleAccountPublicClientApplication mSingleAccountApp;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        mContentMain = findViewById(R.id.content_main);
+        initializeUI();
 
-        Toolbar toolbar = findViewById(R.id.toolbar);
-        setSupportActionBar(toolbar);
-        DrawerLayout drawer = findViewById(R.id.drawer_layout);
-        NavigationView navigationView = findViewById(R.id.nav_view);
-        ActionBarDrawerToggle toggle = new ActionBarDrawerToggle(
-                this, drawer, toolbar, R.string.navigation_drawer_open, R.string.navigation_drawer_close);
-        drawer.addDrawerListener(toggle);
-        toggle.syncState();
-        navigationView.setNavigationItemSelectedListener(this);
-
-        //Set default fragment
-        navigationView.setCheckedItem(R.id.nav_single_account);
-        setCurrentFragment(AppFragment.SingleAccount);
+        PublicClientApplication.createSingleAccountPublicClientApplication(getApplicationContext(),
+                R.raw.auth_config_single_account,
+                new IPublicClientApplication.ISingleAccountApplicationCreatedListener() {
+                    @Override
+                    public void onCreated(ISingleAccountPublicClientApplication application) {
+                        mSingleAccountApp = application;
+                        loadAccount();
+                    }
+                    @Override
+                    public void onError(MsalException exception) {
+                        displayError( exception);
+                    }
+                });
     }
 
-    @Override
-    public boolean onNavigationItemSelected(final MenuItem item) {
-        final DrawerLayout drawer = findViewById(R.id.drawer_layout);
-        drawer.addDrawerListener(new DrawerLayout.DrawerListener() {
-            @Override
-            public void onDrawerSlide(@NonNull View drawerView, float slideOffset) { }
+    private void initializeUI(){
+        signInButton = findViewById(R.id.signIn);
+        callGraphApiSilentButton = findViewById(R.id.callGraphSilent);
+        callGraphApiInteractiveButton = findViewById(R.id.callGraphInteractive);
+        signOutButton = findViewById(R.id.clearCache);
+        logTextView = findViewById(R.id.txt_log);
+        currentUserTextView = findViewById(R.id.current_user);
 
-            @Override
-            public void onDrawerOpened(@NonNull View drawerView) { }
-
-            @Override
-            public void onDrawerClosed(@NonNull View drawerView) {
-                // Handle navigation view item clicks here.
-                int id = item.getItemId();
-
-                if (id == R.id.nav_single_account) {
-                    setCurrentFragment(AppFragment.SingleAccount);
+        signInButton.setOnClickListener(new View.OnClickListener(){
+            public void onClick(View v) {
+                if (mSingleAccountApp == null) {
+                    return;
                 }
+                mSingleAccountApp.signIn(MainActivity.this, null, SCOPES, getAuthInteractiveCallback());
+            }
+        });
 
-                if (id == R.id.nav_multiple_account) {
-                    setCurrentFragment(AppFragment.MultipleAccount);
+        signOutButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (mSingleAccountApp == null){
+                    return;
                 }
+                mSingleAccountApp.signOut(new ISingleAccountPublicClientApplication.SignOutCallback() {
+                    @Override
+                    public void onSignOut() {
+                        updateUI(null);
+                        performOperationOnSignOut();
+                    }
+                    @Override
+                    public void onError(@NonNull MsalException exception){
+                        displayError(exception);
+                    }
+                });
+            }
+        });
 
-                if (id == R.id.nav_b2c) {
-                    setCurrentFragment(AppFragment.B2C);
+        callGraphApiInteractiveButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (mSingleAccountApp == null) {
+                    return;
                 }
+                mSingleAccountApp.acquireToken(MainActivity.this, SCOPES, getAuthInteractiveCallback());
+            }
+        });
 
-                drawer.removeDrawerListener(this);
+        callGraphApiSilentButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (mSingleAccountApp == null){
+                    return;
+                }
+                mSingleAccountApp.acquireTokenSilentAsync(SCOPES, AUTHORITY, getAuthSilentCallback());
+            }
+        });
+    }
+
+    private AuthenticationCallback getAuthInteractiveCallback() {
+        return new AuthenticationCallback() {
+
+            @Override
+            public void onSuccess(IAuthenticationResult authenticationResult) {
+                /* Successfully got a token, use it to call a protected resource - MSGraph */
+                Log.d(TAG, "Successfully authenticated");
+                Log.d(TAG, "ID Token: " + authenticationResult.getAccount().getClaims().get("id_token"));
+
+                /* Update account */
+                updateUI(authenticationResult.getAccount());
+
+                /* call graph */
+                callGraphAPI(authenticationResult);
             }
 
             @Override
-            public void onDrawerStateChanged(int newState) { }
-        });
+            public void onError(MsalException exception) {
+                /* Failed to acquireToken */
+                Log.d(TAG, "Authentication failed: " + exception.toString());
+                displayError(exception);
 
-        drawer.closeDrawer(GravityCompat.START);
-        return true;
+                if (exception instanceof MsalClientException) {
+                    /* Exception inside MSAL, more info inside MsalError.java */
+                } else if (exception instanceof MsalServiceException) {
+                    /* Exception when communicating with the STS, likely config issue */
+                }
+            }
+
+            @Override
+            public void onCancel() {
+                /* User canceled the authentication */
+                Log.d(TAG, "User cancelled login.");
+            }
+        };
     }
 
-    private void setCurrentFragment(final AppFragment newFragment){
-        if (newFragment == mCurrentFragment) {
+    private SilentAuthenticationCallback getAuthSilentCallback() {
+        return new SilentAuthenticationCallback() {
+            @Override
+            public void onSuccess(IAuthenticationResult authenticationResult) {
+                Log.d(TAG, "Successfully authenticated");
+                callGraphAPI(authenticationResult);
+            }
+
+            @Override
+            public void onError(MsalException exception) {
+                Log.d(TAG, "Authentication failed: " + exception.toString());
+                displayError(exception);
+
+            }
+        };
+    }
+
+    private void loadAccount() {
+        if (mSingleAccountApp == null) {
             return;
         }
 
-        mCurrentFragment = newFragment;
-        setHeaderString(mCurrentFragment);
-        displayFragment(mCurrentFragment);
+        mSingleAccountApp.getCurrentAccountAsync(new ISingleAccountPublicClientApplication.CurrentAccountCallback() {
+            @Override
+            public void onAccountLoaded(@Nullable IAccount activeAccount) {
+                // You can use the account data to update your UI or your app database.
+                updateUI(activeAccount);
+            }
+
+            @Override
+            public void onAccountChanged(@Nullable IAccount priorAccount, @Nullable IAccount currentAccount) {
+                if (currentAccount == null) {
+                    // Perform a cleanup task as the signed-in account changed.
+                    performOperationOnSignOut();
+                }
+            }
+
+            @Override
+            public void onError(@NonNull MsalException exception) {
+                displayError(exception);
+            }
+        });
     }
 
-    private void setHeaderString(final AppFragment fragment){
-        switch (fragment) {
-            case SingleAccount:
-                getSupportActionBar().setTitle("Single Account Mode");
-                return;
+    private void callGraphAPI(IAuthenticationResult authenticationResult) {
 
-            case MultipleAccount:
-                getSupportActionBar().setTitle("Multiple Account Mode");
-                return;
+        final String accessToken = authenticationResult.getAccessToken();
 
-            case B2C:
-                getSupportActionBar().setTitle("B2C Mode");
-                return;
+        IGraphServiceClient graphClient =
+                GraphServiceClient
+                        .builder()
+                        .authenticationProvider(new IAuthenticationProvider() {
+                            @Override
+                            public void authenticateRequest(IHttpRequest request) {
+                                Log.d(TAG, "Authenticating request," + request.getRequestUrl());
+                                request.addHeader("Authorization", "Bearer " + accessToken);
+                            }
+                        })
+                        .buildClient();
+
+        graphClient
+                .me()
+                .drive()
+                .buildRequest()
+                .get(new ICallback<Drive>() {
+                    @Override
+                    public void success(final Drive drive) {
+                        Log.d(TAG, "Found Drive " + drive.id);
+                        displayGraphResult(drive.getRawObject());
+                    }
+
+                    @Override
+                    public void failure(ClientException ex) {
+                        displayError(ex);
+                    }
+                });
+
+
+    }
+
+
+    private void displayGraphResult(@NonNull final JsonObject graphResponse) {
+        logTextView.setText(graphResponse.toString());
+    }
+
+    private void performOperationOnSignOut() {
+        final String signOutText = "Signed Out.";
+        currentUserTextView.setText("");
+        Toast.makeText(getApplicationContext(), signOutText, Toast.LENGTH_SHORT)
+                .show();
+    }
+
+    private void updateUI(@Nullable final IAccount account) {
+        if (account != null) {
+            signInButton.setEnabled(false);
+            signOutButton.setEnabled(true);
+            callGraphApiInteractiveButton.setEnabled(true);
+            callGraphApiSilentButton.setEnabled(true);
+            currentUserTextView.setText(account.getUsername());
+        } else {
+            signInButton.setEnabled(true);
+            signOutButton.setEnabled(false);
+            callGraphApiInteractiveButton.setEnabled(false);
+            callGraphApiSilentButton.setEnabled(false);
+            currentUserTextView.setText("");
+            logTextView.setText("");
         }
     }
 
-    private void displayFragment(final AppFragment fragment){
-        switch (fragment) {
-            case SingleAccount:
-                attachFragment(new SingleAccountModeFragment());
-                return;
-
-            case MultipleAccount:
-                attachFragment(new MultipleAccountModeFragment());
-                return;
-
-            case B2C:
-                attachFragment(new B2CModeFragment());
-                return;
-        }
-    }
-
-    private void attachFragment(final Fragment fragment) {
-        getSupportFragmentManager()
-                .beginTransaction()
-                .setTransitionStyle(FragmentTransaction.TRANSIT_FRAGMENT_FADE)
-                .replace(mContentMain.getId(),fragment)
-                .commit();
+    private void displayError(@NonNull final Exception exception) {
+        logTextView.setText(exception.toString());
     }
 }
